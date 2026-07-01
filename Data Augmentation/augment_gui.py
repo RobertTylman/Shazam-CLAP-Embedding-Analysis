@@ -5,7 +5,7 @@ import os
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from augment_core import NoiseSource, run_augmentation
+from augment_core import NoiseSource, run_augmentation, run_pitch_shift_augmentation
 
 
 class AugmentGUI(tk.Tk):
@@ -150,6 +150,13 @@ class AugmentGUI(tk.Tk):
         ttk.Entry(workers_row, textvariable=self.workers_var, width=8).pack(side="left", padx=(4, 8))
         ttk.Label(workers_row, text="parallel CPU cores", style="Sub.TLabel").pack(side="left")
 
+        # Pitch shift
+        pitch_row = ttk.Frame(param_frame)
+        pitch_row.pack(fill="x", pady=(6, 2))
+        self.pitch_shift_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(pitch_row, text="Pitch Shifting  (+1, +2, +3 semitones)",
+                        variable=self.pitch_shift_var).pack(side="left")
+
         # === Progress ===
         progress_frame = ttk.LabelFrame(self, text="  Progress  ", padding=10)
         progress_frame.pack(fill="x", padx=16, pady=8)
@@ -218,8 +225,9 @@ class AugmentGUI(tk.Tk):
 
     def _start(self):
         # Validate
-        if not self._noise_entries:
-            messagebox.showerror("Error", "Add at least one noise source.")
+        do_pitch_shift = self.pitch_shift_var.get()
+        if not self._noise_entries and not do_pitch_shift:
+            messagebox.showerror("Error", "Add at least one noise source, or enable Pitch Shifting.")
             return
 
         try:
@@ -262,25 +270,39 @@ class AugmentGUI(tk.Tk):
         self.cancel_btn.configure(state="normal")
         self.progress["value"] = 0
         self.status_var.set("Starting...")
-        self._log(f"Noise: {', '.join(ns.name for ns in noise_sources)}")
-        self._log(f"SNR levels: {snr_levels}")
+        if noise_sources:
+            self._log(f"Noise: {', '.join(ns.name for ns in noise_sources)}")
+            self._log(f"SNR levels: {snr_levels}")
+        if do_pitch_shift:
+            self._log("Pitch shifting: +1, +2, +3 semitones")
 
         def on_progress(completed, total, last_file):
             self.after(0, self._update_progress, completed, total, last_file)
 
         def run():
             try:
-                count = run_augmentation(
-                    input_dir=input_dir,
-                    output_dir=output_dir,
-                    noise_sources=noise_sources,
-                    snr_levels=snr_levels,
-                    snippet_duration=snippet_dur,
-                    seed=seed,
-                    workers=workers,
-                    progress_callback=on_progress,
-                    cancel_check=lambda: self._cancelled,
-                )
+                count = 0
+                if noise_sources:
+                    count += run_augmentation(
+                        input_dir=input_dir,
+                        output_dir=output_dir,
+                        noise_sources=noise_sources,
+                        snr_levels=snr_levels,
+                        snippet_duration=snippet_dur,
+                        seed=seed,
+                        workers=workers,
+                        progress_callback=on_progress,
+                        cancel_check=lambda: self._cancelled,
+                    )
+                if do_pitch_shift and not self._cancelled:
+                    count += run_pitch_shift_augmentation(
+                        input_dir=input_dir,
+                        output_dir=output_dir,
+                        semitones=[1, 2, 3],
+                        workers=workers,
+                        progress_callback=on_progress,
+                        cancel_check=lambda: self._cancelled,
+                    )
                 self.after(0, self._on_done, count)
             except Exception as e:
                 self.after(0, self._on_error, str(e))

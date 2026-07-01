@@ -85,6 +85,28 @@ def mix_at_snr(signal: np.ndarray, noise: np.ndarray, snr_db: float) -> np.ndarr
     return mixed
 
 
+def _pitch_shift_single(args: tuple) -> str:
+    """Pitch-shift a single file — designed for multiprocessing."""
+    import librosa
+    input_path, output_path, n_steps = args
+    try:
+        signal, sr = sf.read(input_path, dtype="float32")
+    except Exception as e:
+        return f"SKIP:{input_path}:{e}"
+
+    if signal.ndim == 2:
+        signal = signal.mean(axis=1)
+
+    try:
+        shifted = librosa.effects.pitch_shift(signal, sr=sr, n_steps=n_steps)
+    except Exception as e:
+        return f"SKIP:{input_path}:{e}"
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    sf.write(output_path, shifted, sr, subtype="PCM_16")
+    return output_path
+
+
 def _process_single(args: tuple) -> str:
     """Process a single file — designed for multiprocessing."""
     input_path, output_path, noise_kind, noise_data, noise_sr, snr_db, seed_offset = args
@@ -199,6 +221,74 @@ def run_augmentation(
 
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_process_single, job): job for job in jobs}
+        for future in as_completed(futures):
+            if cancel_check and cancel_check():
+                pool.shutdown(wait=False, cancel_futures=True)
+                return completed
+            result = future.result()
+            if result.startswith("SKIP:"):
+                skipped.append(result)
+                if progress_callback:
+                    progress_callback(completed, total, f"[skipped] {result}")
+            else:
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total, result)
+
+    if skipped and progress_callback:
+        progress_callback(completed, total, f"Done. {len(skipped)} files skipped due to errors.")
+
+    return completed
+
+
+def build_pitch_shift_jobs(
+    input_dir: str,
+    output_dir: str,
+    semitones: list[int],
+    skip_existing: bool = True,
+) -> list[tuple]:
+    """Build the job list for pitch-shift augmentation."""
+    files = collect_audio_files(input_dir)
+    jobs = []
+    for n in semitones:
+        label = f"+{n}st" if n >= 0 else f"{n}st"
+        for input_path, genre, fname in files:
+            out_path = os.path.join(output_dir, f"pitch_{label}", genre, fname)
+            if skip_existing and os.path.exists(out_path):
+                continue
+            jobs.append((input_path, out_path, n))
+    return jobs
+
+
+def run_pitch_shift_augmentation(
+    input_dir: str,
+    output_dir: str,
+    semitones: Optional[list[int]] = None,
+    workers: int = 4,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> int:
+    """Run pitch-shift augmentation, producing one shifted copy per semitone step."""
+    if semitones is None:
+        semitones = [1, 2, 3]
+
+    try:
+        import librosa  # noqa: F401
+    except ImportError:
+        raise ImportError("librosa is required for pitch shifting: pip install librosa")
+
+    jobs = build_pitch_shift_jobs(input_dir, output_dir, semitones)
+    total = len(jobs)
+    if total == 0:
+        if progress_callback:
+            progress_callback(0, 0, "Nothing to do — all pitch-shifted files exist")
+        return 0
+
+    completed = 0
+    skipped = []
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_pitch_shift_single, job): job for job in jobs}
         for future in as_completed(futures):
             if cancel_check and cancel_check():
                 pool.shutdown(wait=False, cancel_futures=True)
